@@ -1,0 +1,4 @@
+PySide6
+praw
+openai
+python-dotenv
