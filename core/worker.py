@@ -5,7 +5,7 @@ scraping and AI analysis to keep the GUI responsive.
 """
 
 import logging
-from typing import Dict, Optional, List
+from typing import Dict, Optional, List, Type
 import importlib
 
 from PySide6.QtCore import QObject, Signal, Slot

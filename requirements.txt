@@ -3,3 +3,4 @@ praw
 google-generativeai
 python-dotenv
 feedparser
+PyMuPDF

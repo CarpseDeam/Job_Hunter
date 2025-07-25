@@ -8,6 +8,9 @@ import logging
 import os
 from typing import Any, Dict, Optional
 
+# Import the PDF reading library!
+import fitz  # PyMuPDF
+
 from PySide6.QtCore import (
     QItemSelection,
     QSortFilterProxyModel,
@@ -103,7 +106,8 @@ class MainWindow(QMainWindow):
         self.stop_scan_button.setEnabled(False)
 
         self.resume_path_edit = QLineEdit()
-        self.resume_path_edit.setPlaceholderText("Path to your resume file (.md, .txt)")
+        # Updated placeholder to include PDF!
+        self.resume_path_edit.setPlaceholderText("Path to your resume file (.pdf, .md, .txt)")
         self.browse_resume_button = QPushButton("Browse...")
 
         controls_layout.addWidget(self.start_scan_button)
@@ -166,7 +170,7 @@ class MainWindow(QMainWindow):
         self.justification_edit = QTextEdit()
         self.justification_edit.setReadOnly(True)
         self.cover_letter_edit = QTextEdit()
-        self.cover_letter_edit.setReadOnly(False) # Allow user to edit
+        self.cover_letter_edit.setReadOnly(False)  # Allow user to edit
 
         details_layout.addLayout(details_form_layout)
         details_layout.addWidget(QLabel("<b>Justification:</b>"))
@@ -236,6 +240,7 @@ class MainWindow(QMainWindow):
     def _read_resume_content(self) -> str:
         """
         Reads the content of the resume file specified in the UI.
+        Supports .pdf, .txt, and .md files.
 
         Returns:
             str: The content of the resume file, or an empty string if the
@@ -244,15 +249,32 @@ class MainWindow(QMainWindow):
         resume_path = self.resume_path_edit.text()
         if not resume_path or not os.path.exists(resume_path):
             logger.warning(f"Resume file not found at: {resume_path}")
-            self.handle_error(
-                "Resume file not found. Analysis will proceed without it."
-            )
+            # Don't show a pop-up error here, just proceed without it.
+            # The user will be notified if they click "Start Scan" with a bad path.
+            if self.start_scan_button.isEnabled():  # only show error if they are about to scan
+                self.handle_error("Resume file not found. Analysis will proceed without it.")
             return ""
+
         try:
-            with open(resume_path, "r", encoding="utf-8") as f:
-                return f.read()
+            if resume_path.lower().endswith('.pdf'):
+                logger.info(f"Reading PDF resume from: {resume_path}")
+                text = ""
+                with fitz.open(resume_path) as doc:
+                    for page in doc:
+                        text += page.get_text()
+                return text
+            elif resume_path.lower().endswith(('.txt', '.md')):
+                logger.info(f"Reading text resume from: {resume_path}")
+                with open(resume_path, "r", encoding="utf-8") as f:
+                    return f.read()
+            else:
+                logger.warning(f"Unsupported resume file type: {resume_path}")
+                self.handle_error(
+                    "Unsupported resume file type. Please use .pdf, .txt, or .md."
+                )
+                return ""
         except Exception as e:
-            logger.error(f"Error reading resume file {resume_path}: {e}")
+            logger.error(f"Error reading resume file {resume_path}: {e}", exc_info=True)
             self.handle_error(f"Could not read resume file: {e}")
             return ""
 
@@ -260,13 +282,20 @@ class MainWindow(QMainWindow):
     def start_scan(self) -> None:
         """Prepares for and starts a new scan."""
         logger.info("'Start Scan' button clicked.")
+
+        resume_content = self._read_resume_content()
+        # Check if the path is valid before disabling buttons and starting
+        resume_path = self.resume_path_edit.text()
+        if not resume_content and resume_path:
+            # This means reading the file failed or it was empty. An error was already shown.
+            # We allow the scan to proceed without a resume.
+            pass
+
         self.start_scan_button.setEnabled(False)
         self.stop_scan_button.setEnabled(True)
         self.progress_bar.setVisible(True)
         self.job_table_model.removeRows(0, self.job_table_model.rowCount())
         self.update_status("Starting scan...")
-
-        resume_content = self._read_resume_content()
         self.start_worker_scan.emit(resume_content)
 
     @Slot()
@@ -288,7 +317,7 @@ class MainWindow(QMainWindow):
         """
         logger.debug(f"Adding job to table: {job_data.get('title')}")
         score_item = QStandardItem(str(job_data.get("score", 0)))
-        score_item.setData(job_data, Qt.ItemDataRole.UserRole) # Store full dict
+        score_item.setData(job_data, Qt.ItemDataRole.UserRole)  # Store full dict
 
         title_item = QStandardItem(job_data.get("title", "N/A"))
         company_item = QStandardItem(job_data.get("company_name", "N/A"))
@@ -330,9 +359,13 @@ class MainWindow(QMainWindow):
         QMessageBox.warning(self, "Error", error_message)
         self.update_status("An error occurred.")
 
+        # If the error is about the resume, don't stop the scan from finishing
+        if "Resume file" not in error_message:
+            self.scan_finished()  # Reset button states on critical errors
+
     @Slot(QItemSelection, QItemSelection)
     def display_job_details(
-        self, selected: QItemSelection, deselected: QItemSelection
+            self, selected: QItemSelection, deselected: QItemSelection
     ) -> None:
         """
         Displays the details of the selected job in the right-hand panel.
@@ -366,7 +399,8 @@ class MainWindow(QMainWindow):
     def browse_for_resume(self) -> None:
         """Opens a file dialog to select a resume file."""
         file_dialog = QFileDialog(self)
-        file_dialog.setNameFilter("Text files (*.md *.txt)")
+        # Updated to include PDFs!
+        file_dialog.setNameFilter("Resumes (*.pdf *.md *.txt)")
         file_dialog.setFileMode(QFileDialog.FileMode.ExistingFile)
         if file_dialog.exec():
             filenames = file_dialog.selectedFiles()
