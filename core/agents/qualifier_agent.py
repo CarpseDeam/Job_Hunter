@@ -10,19 +10,19 @@ from typing import Dict, Optional, Any, List
 
 # External dependencies
 try:
-    import openai
-    from openai import OpenAI
-    # PRAW models are only used for type hinting, not direct functionality here.
-    from praw.models import Submission
+    import google.generativeai as genai
+    from google.api_core import exceptions as google_exceptions
+    # PRAW models are no longer used here, but we need JobLead
 except ImportError as e:
     # This will be caught at a higher level, but logging is good practice.
     logging.critical(f"Missing critical dependency: {e}. The QualifierAgent may not function.")
     # Define dummy classes for type hinting if imports fail
-    class Submission: pass
-    class OpenAI: pass
+    genai = None # To prevent further errors
 
 # Project-specific imports
 import config
+from core.agents.base_scout import JobLead
+
 
 logger = logging.getLogger(__name__)
 
@@ -31,42 +31,57 @@ class QualifierAgent:
     """
     Analyzes job leads using an LLM to determine relevance and generate content.
 
-    This agent takes raw job leads (e.g., Reddit posts), compares them against
-    a user's resume and keywords, and uses the OpenAI API to generate a
+    This agent takes standardized JobLead objects, compares them against
+    a user's resume and keywords, and uses the Google Gemini API to generate a
     relevance score, a justification, and a draft cover letter.
     """
 
     def __init__(self) -> None:
         """
-        Initializes the QualifierAgent and the OpenAI client.
+        Initializes the QualifierAgent and the Google Gemini client.
 
-        It checks for the OpenAI API key in the configuration and sets up the
-        client. If the key is not found, the agent will be in a disabled state.
+        It checks for the Google API key in the configuration and sets up the
+        generative model. If the key is not found, the agent will be in a disabled state.
         """
-        self.client: Optional[OpenAI] = None
-        if not config.OPENAI_API_KEY:
+        self.model: Optional["GenerativeModel"] = None
+        if not config.GOOGLE_API_KEY:
             logger.critical(
-                "OPENAI_API_KEY not found in config/.env. "
+                "GOOGLE_API_KEY not found in config/.env. "
                 "QualifierAgent will be non-functional."
             )
             return
 
         try:
-            self.client = OpenAI(api_key=config.OPENAI_API_KEY)
-            # A simple test to ensure the client is configured correctly
-            # This is a lightweight call that doesn't consume many tokens.
-            self.client.models.list()
-            logger.info("OpenAI client initialized successfully.")
-        except openai.AuthenticationError as e:
-            logger.critical(
-                f"OpenAI authentication failed. Please check your API key. Error: {e}"
+            genai.configure(api_key=config.GOOGLE_API_KEY)
+
+            system_instruction = (
+                "You are an expert career assistant. Your task is to analyze a job posting "
+                "based on a user's resume and skills. You MUST respond with a single, "
+                "valid JSON object and nothing else. The JSON object must have the "
+                "following structure: {\"score\": <integer>, \"justification\": \"<string>\", "
+                "\"cover_letter_draft\": \"<string>\", \"extracted_company_name\": "
+                "\"<string or null>\", \"extracted_contact_info\": \"<string or null>\"}."
             )
-            self.client = None
+
+            # Using a fast and capable model, with system instructions for consistent output
+            self.model = genai.GenerativeModel(
+                model_name="gemini-1.5-flash-latest",
+                system_instruction=system_instruction
+            )
+            # A simple test to ensure the client is configured correctly
+            # This is a lightweight call that doesn't consume credits.
+            genai.list_models()
+            logger.info("Google Gemini client initialized successfully.")
+        except google_exceptions.PermissionDenied as e:
+            logger.critical(
+                f"Google API authentication failed. Please check your API key. Error: {e}"
+            )
+            self.model = None
         except Exception as e:
             logger.critical(
-                f"Failed to initialize OpenAI client. Error: {e}", exc_info=True
+                f"Failed to initialize Google Gemini client. Error: {e}", exc_info=True
             )
-            self.client = None
+            self.model = None
 
     def _create_prompt(
         self, job_title: str, job_body: str, resume_content: str, keywords: List[str]
@@ -124,17 +139,17 @@ Return a single, valid JSON object with the following exact structure:
         return prompt.strip()
 
     def analyze_and_qualify(
-        self, lead: Any, resume_content: str
+        self, lead: JobLead, resume_content: str
     ) -> Optional[Dict[str, Any]]:
         """
         Analyzes a single job lead, scores it, and generates a cover letter.
 
-        This method takes a lead object (currently supporting PRAW Submissions),
-        sends its content to the OpenAI API for analysis, and parses the
-        structured JSON response.
+        This method takes a standardized `JobLead` object, sends its content
+        to the Google Gemini API for analysis, and parses the structured JSON
+        response.
 
         Args:
-            lead (Any): The raw lead object. Expected to be a `praw.models.Submission`.
+            lead (JobLead): The standardized lead object from any scout.
             resume_content (str): The text content of the user's resume.
 
         Returns:
@@ -144,57 +159,45 @@ Return a single, valid JSON object with the following exact structure:
                                       analysis fails, the lead is invalid, or
                                       the agent is not initialized.
         """
-        if not self.client:
+        if not self.model:
             logger.warning("QualifierAgent not initialized. Skipping analysis.")
             return None
 
-        # Ensure the lead is a Reddit submission, as that's what we currently support.
-        if not isinstance(lead, Submission):
-            logger.warning(
-                f"Unsupported lead type: {type(lead).__name__}. Skipping analysis."
-            )
-            return None
-
-        job_title = lead.title
-        job_body = lead.selftext
-        job_id = lead.id
-        job_url = f"https://www.reddit.com{lead.permalink}"
-
         # If the post body is empty, it's unlikely to be a valid job post.
-        if not job_body.strip():
-            logger.info(f"Lead '{job_title}' has no body text. Skipping analysis.")
+        if not lead.body.strip():
+            logger.info(f"Lead '{lead.title}' has no body text. Skipping analysis.")
             return None
 
-        logger.info(f"Analyzing lead: {job_title}")
+        logger.info(f"Analyzing lead: {lead.title} (from {lead.source})")
 
         prompt = self._create_prompt(
-            job_title, job_body, resume_content, config.AI_QUALIFICATION_KEYWORDS
+            lead.title, lead.body, resume_content, config.AI_QUALIFICATION_KEYWORDS
         )
 
+        response_content = None # Initialize for the except block
         try:
-            response = self.client.chat.completions.create(
-                model="gpt-4o-mini",  # A capable and cost-effective model
-                messages=[
-                    {
-                        "role": "system",
-                        "content": (
-                            "You are an expert career assistant. Your task is to analyze a job posting "
-                            "based on a user's resume and skills. You MUST respond with a single, "
-                            "valid JSON object and nothing else. The JSON object must have the "
-                            "following structure: {\"score\": <integer>, \"justification\": \"<string>\", "
-                            "\"cover_letter_draft\": \"<string>\", \"extracted_company_name\": "
-                            "\"<string or null>\", \"extracted_contact_info\": \"<string or null>\"}."
-                        ),
-                    },
-                    {"role": "user", "content": prompt},
-                ],
-                response_format={"type": "json_object"},
-                temperature=0.5,  # A bit of creativity for the cover letter but still factual
+            # Configure the model for JSON output and a balanced temperature
+            generation_config = genai.types.GenerationConfig(
+                response_mime_type="application/json",
+                temperature=0.5
             )
 
-            response_content = response.choices[0].message.content
+            response = self.model.generate_content(
+                prompt,
+                generation_config=generation_config,
+            )
+
+            response_content = response.text
             if not response_content:
-                logger.error("OpenAI response was empty.")
+                # Check for safety ratings or other reasons for an empty response
+                try:
+                    # Accessing parts can raise an exception if the list is empty
+                    if not response.parts:
+                        logger.error(f"Gemini response was empty for '{lead.title}'. Finish reason: {response.prompt_feedback}")
+                    else:
+                        logger.error(f"Gemini response was empty for '{lead.title}'. Candidates: {response.candidates}")
+                except (ValueError, IndexError):
+                     logger.error(f"Gemini response was empty and content could not be inspected for '{lead.title}'.")
                 return None
 
             llm_data = json.loads(response_content)
@@ -207,32 +210,32 @@ Return a single, valid JSON object with the following exact structure:
 
             # Assemble the final result dictionary
             analyzed_job = {
-                "id": job_id,
-                "title": job_title,
-                "url": job_url,
-                "source": "Reddit",
+                "id": lead.id,
+                "title": lead.title,
+                "url": lead.url,
+                "source": lead.source,
                 "score": llm_data.get("score", 0),
                 "justification": llm_data.get("justification", "N/A"),
                 "cover_letter": llm_data.get("cover_letter_draft", ""),
                 "company_name": llm_data.get("extracted_company_name"),
                 "contact_info": llm_data.get("extracted_contact_info"),
             }
-            logger.info(f"Successfully analyzed and qualified job: '{job_title}'")
+            logger.info(f"Successfully analyzed and qualified job: '{lead.title}'")
             return analyzed_job
 
-        except openai.APIError as e:
-            logger.error(f"OpenAI API error while analyzing '{job_title}': {e}", exc_info=True)
+        except google_exceptions.GoogleAPICallError as e:
+            logger.error(f"Google API error while analyzing '{lead.title}': {e}", exc_info=True)
             return None
         except json.JSONDecodeError as e:
             logger.error(
-                f"Failed to parse JSON response from LLM for '{job_title}': {e}\n"
+                f"Failed to parse JSON response from LLM for '{lead.title}': {e}\n"
                 f"Raw response: {response_content}",
                 exc_info=True
             )
             return None
         except Exception as e:
             logger.error(
-                f"An unexpected error occurred during qualification of '{job_title}': {e}",
+                f"An unexpected error occurred during qualification of '{lead.title}': {e}",
                 exc_info=True,
             )
             return None

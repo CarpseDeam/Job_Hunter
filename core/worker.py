@@ -5,16 +5,27 @@ scraping and AI analysis to keep the GUI responsive.
 """
 
 import logging
-from typing import Dict, Optional
+from typing import Dict, Optional, List
+import importlib
 
 from PySide6.QtCore import QObject, Signal, Slot
 
-# These imports are based on the project manifest. It is assumed that these
-# modules and their respective classes are available within the project structure.
+import config
+from core.agents.base_scout import BaseScout, JobLead
 from core.agents.qualifier_agent import QualifierAgent
-from core.agents.reddit_scout import RedditScout
 
 logger = logging.getLogger(__name__)
+
+
+def _import_class_from_string(path: str) -> Optional[Type[BaseScout]]:
+    """Dynamically imports a class from a string path."""
+    try:
+        module_name, class_name = path.rsplit('.', 1)
+        module = importlib.import_module(module_name)
+        return getattr(module, class_name)
+    except (ImportError, AttributeError, ValueError) as e:
+        logger.error(f"Failed to import scout class from path '{path}': {e}")
+        return None
 
 
 class Worker(QObject):
@@ -49,7 +60,7 @@ class Worker(QObject):
         """
         super().__init__(parent)
         self._is_running = False
-        self._reddit_scout: Optional[RedditScout] = None
+        self._scouts: List[BaseScout] = []
         self._qualifier_agent: Optional[QualifierAgent] = None
 
     @Slot()
@@ -90,37 +101,49 @@ class Worker(QObject):
         try:
             # Step 1: Initialize Agents
             self.status_updated.emit("Initializing agents...")
-            self._reddit_scout = RedditScout()
             self._qualifier_agent = QualifierAgent()
-            logger.info("Scout and Qualifier agents initialized.")
+            self._scouts = []
+            for scout_path in config.SCOUTS_TO_USE:
+                ScoutClass = _import_class_from_string(scout_path)
+                if ScoutClass:
+                    self._scouts.append(ScoutClass())
 
-            # Step 2: Find Leads
-            self.status_updated.emit("Searching for job leads on Reddit...")
-            leads = self._reddit_scout.find_leads()
+            if not self._scouts:
+                raise RuntimeError("No valid scouts were initialized. Check config.py and logs.")
+
+            logger.info(f"{len(self._scouts)} scout(s) and Qualifier agent initialized.")
+
+            # Step 2: Find Leads from all sources
+            self.status_updated.emit("Searching for job leads from all sources...")
+            all_leads: List[JobLead] = []
+            for scout in self._scouts:
+                if not self._is_running:
+                    raise InterruptedError("Scan cancelled during lead search.")
+                self.status_updated.emit(f"Asking {scout.__class__.__name__} for leads...")
+                all_leads.extend(scout.find_leads())
+
             if not self._is_running:
                 raise InterruptedError("Scan cancelled during lead search.")
 
-            if not leads:
-                logger.info("No new leads found on Reddit.")
+            if not all_leads:
+                logger.info("No new leads found from any source.")
                 self.status_updated.emit("No new job leads found.")
                 self.progress_updated.emit(100)
                 self._is_running = False
                 self.finished.emit()
                 return
 
-            logger.info(f"Found {len(leads)} potential leads. Starting analysis.")
-            total_leads = len(leads)
+            logger.info(f"Found {len(all_leads)} potential leads in total. Starting analysis.")
+            total_leads = len(all_leads)
 
             # Step 3: Analyze Leads
-            for i, lead in enumerate(leads):
+            for i, lead in enumerate(all_leads):
                 if not self._is_running:
                     scan_cancelled = True
                     logger.info("Worker process was stopped externally during analysis.")
                     break
 
-                # Assuming 'lead' object has a 'title' attribute (e.g., from PRAW)
-                lead_title = getattr(lead, "title", "Unknown Title")
-                status_msg = f"Analyzing lead {i + 1}/{total_leads}: {lead_title[:50]}..."
+                status_msg = f"Analyzing lead {i + 1}/{total_leads}: {lead.title[:50]}..."
                 self.status_updated.emit(status_msg)
                 logger.debug(status_msg)
 
@@ -130,12 +153,12 @@ class Worker(QObject):
 
                 if analyzed_job:
                     logger.info(
-                        f"Job '{lead_title}' qualified with score "
+                        f"Job '{lead.title}' qualified with score "
                         f"{analyzed_job.get('score')}."
                     )
                     self.job_found.emit(analyzed_job)
                 else:
-                    logger.info(f"Job '{lead_title}' was not qualified or failed analysis.")
+                    logger.info(f"Job '{lead.title}' was not qualified or failed analysis.")
 
                 progress = int(((i + 1) / total_leads) * 100)
                 self.progress_updated.emit(progress)

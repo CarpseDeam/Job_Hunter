@@ -12,10 +12,27 @@ standardized way.
 
 import logging
 from abc import ABC, abstractmethod
-from typing import Any, List
+from typing import List
+from dataclasses import dataclass
+
 
 # Set up logger for this module
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class JobLead:
+    """
+    A standardized data structure for a potential job lead.
+
+    This class ensures that no matter the source (Reddit, RSS, etc.), the data
+    passed to the QualifierAgent has a consistent structure.
+    """
+    id: str
+    title: str
+    body: str
+    url: str
+    source: str
 
 
 class BaseScout(ABC):
@@ -37,24 +54,21 @@ class BaseScout(ABC):
         logger.info(f"Initializing {self.__class__.__name__}.")
 
     @abstractmethod
-    def find_leads(self) -> List[Any]:
+    def find_leads(self) -> List[JobLead]:
         """
         Searches for and returns a list of potential job leads.
 
         This is the core method for any scout agent. The implementation should
-        contain the logic for connecting to the data source (e.g., Reddit API),
-        querying for relevant information (e.g., posts in 'forhire' subreddits),
-        and returning a list of raw lead objects.
+        contain the logic for connecting to the data source, querying for
+        relevant information, and returning a list of standardized `JobLead`
+        objects.
 
-        Each implementation is responsible for its own error handling (e.g.,
-        network issues, authentication failures) and should return an empty
-        list if no leads can be found or an unrecoverable error occurs.
+        Each implementation is responsible for its own error handling and should
+        return an empty list if no leads can be found or an unrecoverable
+        error occurs.
 
         Returns:
-            List[Any]: A list of raw lead objects. The type of objects in the
-                       list is specific to the scout's implementation (e.g.,
-                       `praw.models.Submission` for a Reddit scout). The
-                       QualifierAgent will be responsible for processing these
-                       diverse object types.
+            List[JobLead]: A list of `JobLead` objects. The QualifierAgent will
+                           process this standardized list.
         """
         pass

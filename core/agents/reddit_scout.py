@@ -11,7 +11,7 @@ import praw
 import prawcore
 from praw.models import Submission
 
-from core.agents.base_scout import BaseScout
+from core.agents.base_scout import BaseScout, JobLead
 import config
 
 # Set up logger for this module
@@ -75,19 +75,18 @@ class RedditScout(BaseScout):
             logger.critical(f"An unexpected error occurred during PRAW initialization: {e}")
             self.reddit = None
 
-    def find_leads(self) -> List[Submission]:
+    def find_leads(self) -> List[JobLead]:
         """
-        Searches configured subreddits for new posts (leads).
+        Searches configured subreddits for new posts and converts them to JobLead objects.
 
         Iterates through the list of subreddits defined in `config.SUBREDDITS_TO_SCAN`,
         fetching the latest posts from each. It ensures that duplicate posts
         (e.g., cross-posts) are not included in the final list.
 
         Returns:
-            List[Submission]: A list of `praw.models.Submission` objects, each
-                              representing a potential job lead. Returns an empty
-                              list if the PRAW client is not initialized or if
-                              no leads are found.
+            List[JobLead]: A list of standardized `JobLead` objects. Returns an empty
+                           list if the PRAW client is not initialized or if
+                           no leads are found.
         """
         if not self.reddit:
             logger.warning(
@@ -96,7 +95,7 @@ class RedditScout(BaseScout):
             )
             return []
 
-        leads: List[Submission] = []
+        leads: List[JobLead] = []
         seen_post_ids = set()
         subreddits = config.SUBREDDITS_TO_SCAN
         limit = config.REDDIT_POST_LIMIT
@@ -113,7 +112,15 @@ class RedditScout(BaseScout):
                 # Fetch the newest submissions from the subreddit
                 for submission in subreddit.new(limit=limit):
                     if submission.id not in seen_post_ids:
-                        leads.append(submission)
+                        # Convert the PRAW Submission to our standard JobLead format
+                        lead = JobLead(
+                            id=submission.id,
+                            title=submission.title,
+                            body=submission.selftext,
+                            url=f"https://www.reddit.com{submission.permalink}",
+                            source=f"Reddit (r/{subreddit_name})",
+                        )
+                        leads.append(lead)
                         seen_post_ids.add(submission.id)
 
             except prawcore.exceptions.Redirect:

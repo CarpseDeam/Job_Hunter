@@ -10,7 +10,7 @@ single source of truth for all configurable parameters.
 
 import logging
 import os
-from typing import List, Optional
+from typing import List, Optional, Type
 
 from dotenv import load_dotenv
 
@@ -26,7 +26,8 @@ logger.info(".env file loaded (if present).")
 # These are loaded from environment variables for security.
 # A .env.example file should guide the user in setting these up.
 
-OPENAI_API_KEY: Optional[str] = os.getenv("OPENAI_API_KEY")
+# Use GOOGLE_API_KEY, with a fallback to GEMINI_API_KEY for user convenience
+GOOGLE_API_KEY: Optional[str] = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
 REDDIT_CLIENT_ID: Optional[str] = os.getenv("REDDIT_CLIENT_ID")
 REDDIT_CLIENT_SECRET: Optional[str] = os.getenv("REDDIT_CLIENT_SECRET")
 REDDIT_USER_AGENT: Optional[str] = os.getenv("REDDIT_USER_AGENT")
@@ -34,7 +35,7 @@ REDDIT_USER_AGENT: Optional[str] = os.getenv("REDDIT_USER_AGENT")
 # --- Validation for Critical Configurations ---
 # The application cannot function without these core credentials.
 _CRITICAL_CONFIGS = {
-    "OpenAI API Key": OPENAI_API_KEY,
+    "Google API Key": GOOGLE_API_KEY,
     "Reddit Client ID": REDDIT_CLIENT_ID,
     "Reddit Client Secret": REDDIT_CLIENT_SECRET,
     "Reddit User Agent": REDDIT_USER_AGENT,
@@ -50,10 +51,19 @@ for name, value in _CRITICAL_CONFIGS.items():
         # or exit here to prevent it from running in a broken state.
         # For now, we just log a critical error.
 
+# --- Scout Configuration ---
+# This is where we define which scouts to use.
+# The worker will dynamically create instances of these classes.
+# Note: We are importing the classes themselves, not instances.
+# To avoid circular imports, we'll do a string-based import in the worker.
+SCOUTS_TO_USE: List[str] = [
+    "core.agents.reddit_scout.RedditScout",
+    "core.agents.rss_scout.RSSScout",
+]
+
 # --- Reddit Scout Configuration ---
 
 # A list of subreddits to scan for job postings.
-# Add or remove subreddit names as needed.
 SUBREDDITS_TO_SCAN: List[str] = [
     "forhire",
     "jobbit",
@@ -64,7 +74,18 @@ SUBREDDITS_TO_SCAN: List[str] = [
 ]
 
 # The number of recent posts to fetch from each subreddit per scan.
-REDDIT_POST_LIMIT: int = 50
+REDDIT_POST_LIMIT: int = 25 # Reduced a bit to make scans faster with more sources
+
+# --- RSS Scout Configuration ---
+
+# A list of RSS feed URLs from various job boards.
+RSS_FEEDS_TO_SCAN: List[str] = [
+    "https://weworkremotely.com/remote-programming-jobs.rss",
+    "https://stackoverflow.com/jobs/feed?r=true",
+    "https://remotive.com/remote-jobs/software-dev/feed",
+    "https://www.python.org/jobs/feed/rss/",
+]
+
 
 # --- AI Qualifier Agent Configuration ---
 
